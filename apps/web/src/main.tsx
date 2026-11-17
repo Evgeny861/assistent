@@ -23,13 +23,14 @@ const STATUS_LABELS: Record<string, string> = {
 };
 const STATUSES = ['inbox', 'active', 'done', 'archived'] as const;
 
-const headers = () => ({
-  'Content-Type': 'application/json',
-  'x-telegram-init-data': window.Telegram?.WebApp?.initData || '',
-});
-
 async function api(path: string, options: RequestInit = {}) {
-  const r = await fetch('/api' + path, { ...options, headers: { ...headers(), ...options.headers } });
+  const headers: Record<string, string> = {
+    'x-telegram-init-data': window.Telegram?.WebApp?.initData || '',
+  };
+  // Content-Type only with a body: Fastify rejects an empty JSON body with 400
+  // (this broke DELETE, which has no body).
+  if (options.body != null) headers['Content-Type'] = 'application/json';
+  const r = await fetch('/api' + path, { ...options, headers: { ...headers, ...(options.headers as Record<string, string>) } });
   if (!r.ok) {
     const messages: Record<number, string> = {
       401: 'Требуется вход через Telegram',

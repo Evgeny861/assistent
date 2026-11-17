@@ -28,6 +28,15 @@ const app = Fastify({
 });
 await app.register(cors, { origin: allowedOrigin });
 
+// Tolerate an empty JSON body (e.g. a DELETE sent with Content-Type: application/json
+// by an older web bundle) instead of failing with 400 before the handler runs.
+// Routes validate their own schemas, so an empty/missing body is a normal 400 there.
+app.removeContentTypeParser('application/json');
+app.addContentTypeParser('application/json', { parseAs: 'string' }, (_req, rawBody, done) => {
+  if (!rawBody) return done(null, undefined);
+  done(null, JSON.parse(String(rawBody)));
+});
+
 const limiter = new RateLimiter(60_000, 120); // 120 req/min per IP+path, 60s window
 const sweeper = setInterval(() => limiter.sweep(), 300_000);
 
