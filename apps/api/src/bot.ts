@@ -144,8 +144,9 @@ ${reminder.draft.title}`;
   }
 
   function beginReminder(owner: string, text: string, previous: TelegramDraft | undefined, input: string, now: number) {
-    const draft = drafts.begin(owner, text, previous);
+    const draft = drafts.begin(owner, text, previous, now);
     const existing = previous?.state.reminder?.draft;
+    draft.state.source = previous?.state.source;
     draft.state.reminder = planReminder(input, now, existing?.timeZone ?? reminderTimeZone, existing);
     drafts.update(owner, draft.revision, draft.state);
     return draft;
@@ -154,9 +155,13 @@ ${reminder.draft.title}`;
   async function respond(ctx: Context, owner: string, draft: TelegramDraft, previous: TelegramDraft | undefined, saveDirectly: boolean) {
     await clearDraftKeyboard(ctx, previous);
     const projects = [...new Set([...getExistingProjects(db, owner), ...projectAllowlist])];
-    const state = await planConversation(draft.state, projects);
+    const state = await planConversation(draft.state, projects, reminderTimeZone);
     const decision = state.turns.at(-1)?.decision;
     if (!decision || !drafts.update(owner, draft.revision, state)) return;
+    if (state.reminder) {
+      await showReminderDraft(ctx, owner, { ...draft, state });
+      return;
+    }
     if (decision.action === 'draft' && saveDirectly) {
       const saved = drafts.confirm(owner, draft.revision);
       if (saved) await showSaved(ctx, draft, saved);
@@ -175,8 +180,10 @@ ${reminder.draft.title}`;
     } else if (decision.action === 'clarify') {
       text = decision.question;
       for (const [i, choice] of decision.choices.entries()) keyboard.text(choice, `draft:${draft.revision}:${i}`).row();
-    } else {
+    } else if (decision.action === 'reply') {
       text = decision.text;
+    } else {
+      return;
     }
     const hasKeyboard = keyboard.inline_keyboard.some((row) => row.length);
     const message = await ctx.reply(text, hasKeyboard ? { reply_markup: keyboard } : undefined);
@@ -215,7 +222,7 @@ ${reminder.draft.title}`;
     if (previous?.state.reminder && !directSave(text)) {
       return { action: 'reminder', previous, draft: beginReminder(owner, text, previous, text, now) } as const;
     }
-    return { action: 'plan', previous, draft: drafts.begin(owner, text, previous?.state.reminder ? undefined : previous) } as const;
+    return { action: 'plan', previous, draft: drafts.begin(owner, text, previous?.state.reminder ? undefined : previous, now) } as const;
   });
 
   bot.on('message:text', async (ctx) => {

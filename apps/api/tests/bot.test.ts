@@ -102,13 +102,23 @@ test('Telegram drafts: discuss, correct, confirm once, cancel, and reject obsole
   const { startTelegramBot } = await import('../src/bot.js');
   process.env.REMINDER_TIME_ZONE = 'Europe/Moscow';
   const { startReminderDelivery } = await import('../src/reminders.js');
+  const geyser = 'Завтра в 13 позвонить договориться по обслуживанию гейзера';
+  const aiReminders = new Map([
+    [geyser, { title: 'Позвонить по обслуживанию гейзера', when: 'Завтра в 13' }],
+    ['Забрать заказ завтра вечером', { title: 'забрать заказ', when: 'завтра вечером' }],
+    ['Отправить заявку к пятнице', { title: 'Отправить заявку', when: 'к пятнице' }],
+    ['Завтра в 130 проверить отчёт', { title: 'Проверить отчёт', when: 'Завтра в 13' }],
+  ]);
   const realFetch = globalThis.fetch;
   t.mock.method(globalThis, 'fetch', (input: string | URL | Request, init?: RequestInit) => {
     if (!String(input).startsWith('https://generativelanguage.googleapis.com/')) return realFetch(input, init);
     const body = JSON.parse(String(init?.body));
     const data = JSON.parse(body.contents[0].parts[0].text.split('\n').at(-1));
     const latest = data.turns.at(-1).text;
-    const payload = latest === 'Мстители в кино'
+    const reminder = aiReminders.get(latest);
+    const payload = reminder
+      ? { action: 'reminder', ...reminder }
+      : latest === 'Мстители в кино'
       ? { action: 'clarify', question: 'Хочешь сходить или узнать дату?', choices: ['Хочу сходить', 'Узнать дату'] }
       : latest === 'Узнать дату'
         ? { action: 'reply', text: 'Сейчас у меня нет доступа к поиску.' }
@@ -280,7 +290,7 @@ test('Telegram drafts: discuss, correct, confirm once, cancel, and reject obsole
     return draftMessages()[index];
   };
 
-  queue.push(privateText(21, 111, 'Напомни завтра вечером забрать заказ'));
+  queue.push(privateText(21, 111, 'Забрать заказ завтра вечером'));
   const asksTime = await nextDraft(7);
   assert.match(asksTime.text!, /Во сколько/);
   assert.deepEqual(scheduled(), []);
@@ -300,6 +310,7 @@ test('Telegram drafts: discuss, correct, confirm once, cancel, and reject obsole
   await waitFor(() => calls.some((call) => call.callback_query_id === '27'), 'old, other-owner, and repeated callbacks handled');
   assert.equal(scheduled().length, 1);
   assert.equal(entries().at(-1)?.title, 'забрать заказ');
+  assert.equal(entries().at(-1)?.classification_source, 'gemini');
   const savedReminder = calls.find((call) => call.method === 'editMessageText' && call.message_id === revision.message_id);
   assert.match(savedReminder?.text ?? '', /^✓ Напомню.*20:00/u);
   assert.deepEqual(savedReminder?.reply_markup?.inline_keyboard, []);
@@ -345,6 +356,32 @@ test('Telegram drafts: discuss, correct, confirm once, cancel, and reject obsole
   assert.equal(scheduled()[0].status, 'cancelled');
   db.prepare('DELETE FROM entries WHERE id = ?').run(firstReminder.entry_id);
   assert.equal(scheduled().length, 1);
+
+  const before = entries().length;
+  const nextDraftIndex = draftMessages().length;
+  queue.push(privateText(34, 111, geyser));
+  const geyserDraft = await nextDraft(nextDraftIndex);
+  assert.match(geyserDraft.text!, /Напомнить \d{2}\.\d{2}\.\d{4} в 13:00 \(МСК\)\?\nПозвонить по обслуживанию гейзера/u);
+  assert.equal(menu(geyserDraft)[0].text, '✓ Подтвердить');
+  assert.equal(entries().length, before);
+  assert.equal(scheduled().length, 1);
+  queue.push(press(35, 111, geyserDraft.message_id, menu(geyserDraft)[0].callback_data));
+  await waitFor(() => scheduled().length === 2, 'Gemini suggestion is scheduled after confirmation');
+  assert.equal(entries().at(-1)?.original_text, geyser);
+
+  queue.push(privateText(36, 111, 'Отправить заявку к пятнице'));
+  const deadline = await nextDraft(nextDraftIndex + 1);
+  assert.match(deadline.text!, /^В какой день и во сколько напомнить\? Срок — «к пятнице»\./u);
+  queue.push(privateText(37, 111, 'отмена'), privateText(38, 111, 'Завтра в 130 проверить отчёт'));
+  const ungrounded = await nextDraft(nextDraftIndex + 2);
+  assert.match(ungrounded.text!, /^В какой день и во сколько напомнить/u);
+  assert.ok(menu(ungrounded).every((button) => button.text !== '✓ Подтвердить'));
+  assert.equal(scheduled().length, 2);
+
+  queue.push(privateText(39, 111, 'отмена'), privateText(40, 111, 'Купить билеты на пятницу'));
+  const ordinary = await nextDraft(nextDraftIndex + 3);
+  assert.match(ordinary.text!, /^Записать\?/u);
+  assert.equal(menu(ordinary)[0].text, '✓ Сохранить');
 });
 
 

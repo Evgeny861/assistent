@@ -87,7 +87,10 @@ function calendarDate(year: number, month: number, date: number) {
   }
 }
 
-export function planReminder(input: string, now: number, timeZone: string, previous?: ReminderDraft) {
+export function planReminder(
+  input: string, now: number, timeZone: string, previous?: ReminderDraft,
+  { scheduleOnly = false } = {},
+) {
   const today = wallTime(now, timeZone).date;
   const utcDay = Date.parse(today + 'T00:00:00Z');
   const draft: ReminderDraft = previous ? { ...previous } : { title: '', timeZone };
@@ -97,7 +100,7 @@ export function planReminder(input: string, now: number, timeZone: string, previ
   let issue: string | undefined;
   let recognized = false;
 
-  if (titleEdit) {
+  if (titleEdit && !scheduleOnly) {
     draft.title = titleEdit[1].trim().slice(0, 180);
     text = '';
   }
@@ -201,7 +204,7 @@ export function planReminder(input: string, now: number, timeZone: string, previ
     draft.date = draft.time = undefined;
     draft.dueAt = undefined;
     issue = 'Укажи один вариант даты и времени, например «завтра в 19:30».';
-  } else if (rest && (!draft.title || recognized)) {
+  } else if (!scheduleOnly && rest && (!draft.title || recognized)) {
     draft.title = rest.slice(0, 180);
   }
 
@@ -215,7 +218,7 @@ export function planReminder(input: string, now: number, timeZone: string, previ
     issue ??= 'Это время уже прошло. На когда перенести напоминание?';
   }
 
-  if (previous?.title && !recognized && !titleEdit && !/^(?:да|подтверждаю)$/iu.test(text)) {
+  if (!scheduleOnly && previous?.title && !recognized && !titleEdit && !/^(?:да|подтверждаю)$/iu.test(text)) {
     issue ??= 'Укажи дату или время, например «завтра в 19:30». Чтобы исправить задачу, напиши «текст: …».';
   }
   const question = issue ?? (!draft.title ? 'О чём напомнить?'

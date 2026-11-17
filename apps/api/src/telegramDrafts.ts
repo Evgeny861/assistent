@@ -26,11 +26,11 @@ export function telegramDrafts(db: Database) {
     if (row) return { revision: row.revision, messageId: row.message_id, state: JSON.parse(row.state) as ConversationState };
   }
 
-  function begin(owner: string, text: string, previous?: TelegramDraft): TelegramDraft {
+  function begin(owner: string, text: string, previous?: TelegramDraft, sentAt = Date.now()): TelegramDraft {
     const revision = randomUUID();
     const state: ConversationState = {
       originalText: previous?.state.originalText ?? text,
-      turns: [...(previous?.state.turns.slice(-5) ?? []), { text }],
+      turns: [...(previous?.state.turns.slice(-5) ?? []), { text, sentAt }],
     };
     replace.run(owner, revision, JSON.stringify(state));
     return { revision, state, messageId: null };
@@ -61,7 +61,7 @@ export function telegramDrafts(db: Database) {
     if (dueAt <= Date.now()) return { expired: true } as const;
     const entry = addEntry(owner, draft.state.originalText, db, {
       classification: { title, kind: 'task', tags: [], confidence: 1 },
-      source: 'rules',
+      source: draft.state.source ?? 'rules',
     });
     schedule.run(entry.id, owner, chatId, dueAt, timeZone, dueAt);
     remove.run(owner, revision);
