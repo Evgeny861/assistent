@@ -93,6 +93,34 @@ const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 7,
+    up: () => {
+      db.exec(`
+        CREATE TABLE reminders (
+          entry_id TEXT PRIMARY KEY REFERENCES entries(id) ON DELETE CASCADE,
+          owner_id TEXT NOT NULL,
+          chat_id INTEGER NOT NULL,
+          due_at INTEGER NOT NULL,
+          time_zone TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'pending'
+            CHECK(status IN ('pending', 'sending', 'sent', 'failed', 'cancelled')),
+          next_attempt_at INTEGER NOT NULL,
+          lease_until INTEGER,
+          attempts INTEGER NOT NULL DEFAULT 0,
+          telegram_message_id INTEGER
+        );
+        CREATE INDEX idx_reminders_poll ON reminders(status, next_attempt_at, lease_until);
+        CREATE INDEX idx_reminders_owner ON reminders(owner_id, status, due_at);
+        CREATE TRIGGER cancel_closed_entry_reminder AFTER UPDATE OF status ON entries
+        WHEN NEW.status IN ('done', 'archived')
+        BEGIN
+          UPDATE reminders SET status = 'cancelled'
+          WHERE entry_id = NEW.id AND status IN ('pending', 'sending', 'failed');
+        END;
+      `);
+    },
+  },
 ];
 function migrate() {
   db.exec('CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)');
@@ -114,9 +142,17 @@ export type Entry = {
 };
 const INSERT_SQL = `INSERT INTO entries (id,owner_id,original_text,title,kind,project,status,tags,ai_state,classification_source,created_at,updated_at)
   VALUES (@id,@owner_id,@original_text,@title,@kind,@project,@status,@tags,@ai_state,@classification_source,@created_at,@updated_at)`;
-const SELECT_SQL = 'SELECT id, owner_id, original_text, title, kind, project, status, tags, ai_state, classification_source, created_at, updated_at FROM entries WHERE owner_id = ? ORDER BY created_at DESC';
-export function listEntries(owner: string): Entry[] {
-  return db.prepare(SELECT_SQL).all(owner) as Entry[];
+const SELECT_SQL = `SELECT e.id, e.owner_id, e.original_text, e.title, e.kind, e.project, e.status, e.tags,
+  e.ai_state, e.classification_source, e.created_at, e.updated_at,
+  r.due_at AS reminder_due_at, r.time_zone AS reminder_time_zone, r.status AS reminder_status
+  FROM entries e LEFT JOIN reminders r ON r.entry_id = e.id WHERE e.owner_id = ? ORDER BY e.created_at DESC`;
+type EntryWithReminder = Entry & {
+  reminder_due_at: number | null;
+  reminder_time_zone: string | null;
+  reminder_status: string | null;
+};
+export function listEntries(owner: string): EntryWithReminder[] {
+  return db.prepare(SELECT_SQL).all(owner) as EntryWithReminder[];
 }
 export function addEntry(
   owner: string,

@@ -100,6 +100,8 @@ test('Telegram drafts: discuss, correct, confirm once, cancel, and reject obsole
   process.env.TELEGRAM_ALLOWED_USER_IDS = '111,333';
   const { db, closeDb } = await import('../src/db.js');
   const { startTelegramBot } = await import('../src/bot.js');
+  process.env.REMINDER_TIME_ZONE = 'Europe/Moscow';
+  const { startReminderDelivery } = await import('../src/reminders.js');
   const realFetch = globalThis.fetch;
   t.mock.method(globalThis, 'fetch', (input: string | URL | Request, init?: RequestInit) => {
     if (!String(input).startsWith('https://generativelanguage.googleapis.com/')) return realFetch(input, init);
@@ -130,6 +132,7 @@ test('Telegram drafts: discuss, correct, confirm once, cancel, and reject obsole
   const queue: Record<string, unknown>[] = [];
   const calls: TelegramRequest[] = [];
   let messageId = 1000;
+  let rejectNextReminder = false;
   const mock = createServer((req, res) => {
     let body = '';
     req.on('data', (d) => (body += String(d)));
@@ -149,6 +152,10 @@ test('Telegram drafts: discuss, correct, confirm once, cancel, and reject obsole
         const args = body ? JSON.parse(body) : {};
         if (method === 'sendMessage') args.message_id = ++messageId;
         calls.push({ method, ...args });
+        if (method === 'sendMessage' && args.text?.startsWith('🔔') && rejectNextReminder) {
+          rejectNextReminder = false;
+          return reply({ ok: false, error_code: 429, description: 'Too Many Requests', parameters: { retry_after: 45 } });
+        }
         reply({ ok: true, result: method === 'answerCallbackQuery' ? true : botMessage(args.message_id, args.chat_id) });
       }
     });
@@ -159,7 +166,9 @@ test('Telegram drafts: discuss, correct, confirm once, cancel, and reject obsole
   const errors: unknown[] = [];
   const log = { info: () => {}, warn: () => {}, error: (error: unknown) => errors.push(error) };
   const bot = startTelegramBot({ token: BOT_TOKEN, db, log, apiBaseURL: `http://127.0.0.1:${mockPort}` });
+  let worker: ReturnType<typeof startReminderDelivery> | undefined;
   t.after(async () => {
+    await worker?.stop();
     await bot.stop();
     await new Promise<void>((r) => mock.close(() => r()));
     closeDb();
@@ -261,4 +270,104 @@ test('Telegram drafts: discuss, correct, confirm once, cancel, and reject obsole
   assert.equal(entries().length, 3);
   assert.deepEqual(db.prepare('SELECT owner_id FROM telegram_drafts').all(), []);
   assert.equal(errors.length, 1, 'only the injected storage error is expected');
+
+  const scheduled = () => db.prepare('SELECT entry_id, status, due_at, next_attempt_at, attempts FROM reminders ORDER BY rowid').all() as {
+    entry_id: string; status: string; due_at: number; next_attempt_at: number; attempts: number;
+  }[];
+  const sent = () => calls.filter((call) => call.method === 'sendMessage' && call.text?.startsWith('🔔'));
+  const nextDraft = async (index: number) => {
+    await waitFor(() => draftMessages().length > index, 'bot sends a reminder draft');
+    return draftMessages()[index];
+  };
+
+  queue.push(privateText(21, 111, 'Напомни завтра вечером забрать заказ'));
+  const asksTime = await nextDraft(7);
+  assert.match(asksTime.text!, /Во сколько/);
+  assert.deepEqual(scheduled(), []);
+  queue.push(privateText(22, 111, '19:30'));
+  const proposal = await nextDraft(8);
+  assert.match(proposal.text!, /Напомнить \d{2}\.\d{2}\.\d{4} в 19:30 \(МСК\)\?\nзабрать заказ/u);
+  queue.push(privateText(23, 111, 'нет, лучше в 20:00'));
+  const revision = await nextDraft(9);
+  assert.ok(cleared(proposal.message_id));
+  assert.match(revision.text!, /20:00 \(МСК\)\?\nзабрать заказ/u);
+  queue.push(
+    press(24, 111, proposal.message_id, menu(proposal)[0].callback_data),
+    press(25, 333, revision.message_id, menu(revision)[0].callback_data),
+    press(26, 111, revision.message_id, menu(revision)[0].callback_data),
+    press(27, 111, revision.message_id, menu(revision)[0].callback_data),
+  );
+  await waitFor(() => calls.some((call) => call.callback_query_id === '27'), 'old, other-owner, and repeated callbacks handled');
+  assert.equal(scheduled().length, 1);
+  assert.equal(entries().at(-1)?.title, 'забрать заказ');
+  const savedReminder = calls.find((call) => call.method === 'editMessageText' && call.message_id === revision.message_id);
+  assert.match(savedReminder?.text ?? '', /^✓ Напомню.*20:00/u);
+  assert.deepEqual(savedReminder?.reply_markup?.inline_keyboard, []);
+
+  queue.push(privateText(28, 111, 'через 3 часа напомни купить билеты на новый год'));
+  const relativeProposal = await nextDraft(10);
+  assert.match(relativeProposal.text!, /купить билеты на новый год/u);
+  queue.push(privateText(29, 111, 'да'), commandUpdate(30, 111, 'reminders'));
+  const list = await nextDraft(11);
+  assert.match(list.text!, /купить билеты на новый год/u);
+  const [firstReminder, secondReminder] = scheduled();
+  assert.ok(secondReminder.due_at > Date.now() + 179 * 60_000);
+  const cancel = menu(list).find((button) => button.callback_data.includes(secondReminder.entry_id))!;
+  queue.push(press(31, 111, list.message_id, cancel.callback_data));
+  await waitFor(() => scheduled()[1].status === 'cancelled', 'owner cancels a pending reminder in the list');
+
+  const restartWorker = () => startReminderDelivery(db, bot.api, { error: () => {} }, 20);
+  const forceDue = () => db.prepare('UPDATE reminders SET next_attempt_at = ? WHERE entry_id = ?').run(Date.now() - 1, firstReminder.entry_id);
+  rejectNextReminder = true;
+  forceDue();
+  worker = restartWorker();
+  await waitFor(() => scheduled()[0].status === 'pending' && scheduled()[0].attempts === 1, '429 reschedules persisted delivery');
+  assert.ok(scheduled()[0].next_attempt_at >= Date.now() + 44_000);
+  await worker.stop();
+
+  forceDue();
+  worker = restartWorker();
+  await waitFor(() => scheduled()[0].status === 'sent', 'worker start picks up a persisted due reminder');
+  assert.equal(sent().length, 2);
+  const delivered = sent().at(-1)!;
+  assert.match(delivered.text!, /забрать заказ/u);
+  assert.deepEqual(menu(delivered).map(({ text }) => text), ['✓ Готово', 'Через 10 минут']);
+  queue.push(
+    press(32, 111, delivered.message_id, menu(delivered)[1].callback_data),
+    press(33, 111, delivered.message_id, menu(delivered)[1].callback_data),
+  );
+  await waitFor(() => calls.some((call) => call.callback_query_id === '33'), 'old button cannot snooze twice');
+  assert.equal(scheduled()[0].status, 'pending');
+  assert.ok(scheduled()[0].due_at > Date.now() + 9 * 60_000);
+  assert.equal(sent().length, 2);
+  const archive = db.prepare("UPDATE entries SET status = 'archived' WHERE id = ?");
+  archive.run(firstReminder.entry_id);
+  assert.equal(scheduled()[0].status, 'cancelled');
+  db.prepare('DELETE FROM entries WHERE id = ?').run(firstReminder.entry_id);
+  assert.equal(scheduled().length, 1);
+});
+
+
+test('reminder time planning preserves local dates and asks about missing or ambiguous times', async () => {
+  const { formatReminder, planReminder, reminderRequest } = await import('../src/reminderTime.js');
+  const zone = 'Europe/Moscow';
+  const now = Date.parse('2026-11-17T14:03:27Z');
+  const input = reminderRequest('через 3 часа напомни купить билеты на новый год')!;
+  const relative = planReminder(input, now, zone);
+  assert.equal(relative.question, undefined);
+  assert.equal(relative.draft.title, 'купить билеты на новый год');
+  assert.equal(relative.draft.dueAt, Date.parse('2026-11-17T17:03:27Z'));
+  assert.equal(formatReminder(relative.draft.dueAt!, zone), '17.11.2026 в 20:03 (МСК)');
+  assert.equal(planReminder('через час 10 минут проверить тесты', now, zone).draft.dueAt, now + 70 * 60_000);
+  assert.equal(planReminder('завтра в 7 вечера купить билеты', now, zone).draft.time, '19:00');
+  assert.match(planReminder('завтра в 7 купить билеты', now, zone).question!, /07:00 или 19:00/u);
+  const timeFirst = planReminder('купить билеты в 19:00', now, zone);
+  assert.match(timeFirst.question!, /В какой день/u);
+  assert.equal(planReminder('завтра', now, zone, timeFirst.draft).draft.dueAt, Date.parse('2026-11-18T16:00Z'));
+  assert.match(planReminder('сегодня в 16:00 купить билеты', now, zone).question!, /уже прошло/u);
+  assert.match(planReminder('31.11 в 10:00 купить билеты', now, zone).question!, /Такой даты нет/u);
+  assert.match(planReminder('купить билеты сегодня или завтра в 19:00', now, zone).question!, /один вариант/u);
+  const dst = planReminder('25.10.2026 в 02:30 позвонить', Date.parse('2026-10-23T12:00Z'), 'Europe/Amsterdam');
+  assert.match(dst.question!, /перевода часов/u);
+  assert.equal(dst.draft.dueAt, undefined);
 });

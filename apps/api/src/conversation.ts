@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import type { ReminderDraft } from './reminderTime.js';
 import { classificationSchema, deterministicClassifier, GeminiClassifier, getClassifier, KINDS } from './classifier.js';
 
 const shortText = z.string().trim().min(1).max(600);
@@ -22,6 +23,7 @@ export type ConversationState = {
   originalText: string;
   turns: Turn[];
   source?: 'gemini' | 'rules';
+  reminder?: { draft: ReminderDraft; question?: string };
 };
 
 export const directSave = (text: string) => /^(?:запиши(?:те)?|сохрани(?:те)?)(?:[:,]\s*|\s+)\S/iu.test(text);

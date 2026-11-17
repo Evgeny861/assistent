@@ -12,6 +12,7 @@ import { getClassifier, KINDS } from './classifier.js';
 import { RateLimiter } from './rateLimit.js';
 import { AiWorker } from './aiWorker.js';
 import { startTelegramBot } from './bot.js';
+import { startReminderDelivery } from './reminders.js';
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
 // Local-only bypass. Hard-disabled when NODE_ENV=production.
@@ -41,6 +42,7 @@ const limiter = new RateLimiter(60_000, 120); // 120 req/min per IP+path, 60s wi
 const sweeper = setInterval(() => limiter.sweep(), 300_000);
 
 let bot: Bot | undefined;
+let reminderDelivery: ReturnType<typeof startReminderDelivery> | undefined;
 
 // Recovery loop: re-classifies pending entries (immediately after startup, then every few seconds).
 const aiWorker = new AiWorker(db);
@@ -145,6 +147,7 @@ app.log.info(`IdeaFlow listening (classifier: ${getClassifier().name}, devBypass
 
 if (token) {
   bot = startTelegramBot({ token, db, log: app.log, webOrigin: process.env.WEB_ORIGIN });
+  reminderDelivery = startReminderDelivery(db, bot.api, app.log);
 } else {
   app.log.warn('TELEGRAM_BOT_TOKEN is not set — bot polling disabled');
 }
@@ -158,7 +161,9 @@ async function shutdown(signal: string) {
   app.log.info(`${signal} received, shutting down`);
   clearInterval(sweeper);
   aiWorker.stop();
-  try { bot?.stop(); } catch { /* not started */ }
+  const botStop = bot?.stop().catch(() => app.log.warn('Could not stop Telegram polling'));
+  await reminderDelivery?.stop();
+  await botStop;
   try { await app.close(); } catch { /* ignore */ }
   closeDb();
   process.exit(0);

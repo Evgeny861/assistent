@@ -17,9 +17,27 @@ Dev with hot reload: `npm run dev` (API on :3000, Vite on :5173; `DEV_AUTH_BYPAS
 - Set `TELEGRAM_BOT_TOKEN` in `.env` and restart to enable long polling in private chats. Recall proposes a draft or asks a question. Confirm with **✓ Сохранить** or the text «да», correct the draft with a follow-up, or say «пока не сохраняй» to cancel. An explicit «Запиши …» saves directly when the intent is clear. Only confirmed entries appear in the Mini App.
 - BotFather setup (one-time, by the bot owner):
   1. `/newbot` → copy the token to `.env` (`TELEGRAM_BOT_TOKEN`).
-  2. `/setcommands` → commands `start`, `help` (Russian descriptions optional).
+  2. `/setcommands` → commands `start`, `help`, `reminders` (Russian descriptions optional).
   3. Mini App: `/newapp` (or `/setmenubutton`) → enter your **public HTTPS** origin. The same URL goes into `WEB_ORIGIN` — the "Open app" inline button links to it.
 - The Mini App authenticates itself with the `x-telegram-init-data` header (HMAC, ±1 h). For a private deployment, set `TELEGRAM_ALLOWED_USER_IDS` to a comma-separated list of Telegram user IDs. The bot ignores other users, and their authenticated API requests get `403`.
+
+## Напоминания в Telegram
+
+Напиши «через 3 часа напомни купить билеты» или «напомни завтра в 19:30 купить билеты».
+Если данных мало, бот спросит дату, время или что именно напомнить. Можно ответить «20:00»,
+«лучше в пятницу» или «текст: забрать заказ». Бот покажет полные дату, время и часовой пояс.
+Кнопка «✓ Подтвердить» (или ответ «да») ставит напоминание. Часовой пояс задаёт
+`REMINDER_TIME_ZONE` (по умолчанию `Europe/Moscow`).
+
+Команда `/reminders` показывает ближайшие напоминания и позволяет их отменить.
+У доставленного сообщения есть кнопки «✓ Готово» и «Через 10 минут». В Mini App
+дата и статус видны на карточке задачи. Выполнение, архивирование и удаление
+карточки отменяют предстоящую отправку, если она ещё не началась.
+
+Запланированное время и очередь хранятся в SQLite. После простоя бот отправит
+просроченные активные напоминания. Временные ошибки Telegram повторяются с задержкой.
+При обрыве между приёмом сообщения Telegram и записью результата в SQLite возможна
+повторная доставка. Gemini для напоминаний не требуется.
 
 ## API
 

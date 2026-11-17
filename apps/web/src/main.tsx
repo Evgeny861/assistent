@@ -6,6 +6,9 @@ import './style.css';
 type Entry = {
   id: string; original_text: string; title: string; kind: string;
   project: string; status: string; tags: string[]; ai_state: string; classification_source: 'gemini' | 'rules' | null; created_at: string;
+  reminder_due_at?: number | null;
+  reminder_time_zone?: string | null;
+  reminder_status?: keyof typeof REMINDER_LABELS | null;
 };
 
 declare global {
@@ -20,6 +23,10 @@ const KIND_LABELS: Record<string, string> = {
 };
 const STATUS_LABELS: Record<string, string> = {
   inbox: 'Входящие', active: 'В работе', done: 'Готово', archived: 'Архив',
+};
+const REMINDER_LABELS = {
+  pending: 'Напомню', sending: 'Отправляется', sent: 'Напоминание отправлено',
+  failed: 'Не удалось отправить напоминание', cancelled: 'Напоминание отменено',
 };
 const STATUSES = ['inbox', 'active', 'done', 'archived'] as const;
 
@@ -60,6 +67,11 @@ function Card({ x, onChanged, onDelete }: { x: Entry; onChanged: () => void; onD
     const next = JSON.stringify(arr);
     if (next !== JSON.stringify(x.tags || [])) void send({ tags: arr } as Record<string, unknown>);
   };
+  const reminderDate = x.reminder_due_at && x.reminder_time_zone
+    ? new Intl.DateTimeFormat('ru-RU', {
+      timeZone: x.reminder_time_zone, dateStyle: 'short', timeStyle: 'short',
+    }).format(x.reminder_due_at) + ' (' + (x.reminder_time_zone === 'Europe/Moscow' ? 'МСК' : x.reminder_time_zone) + ')'
+    : null;
   const labels = { gemini: 'Разобрано Gemini', rules: 'Разобрано по правилам' };
   return (
     <article className="entry">
@@ -71,6 +83,9 @@ function Card({ x, onChanged, onDelete }: { x: Entry; onChanged: () => void; onD
         <span className="date">{new Date(x.created_at).toLocaleDateString('ru-RU')}</span>
       </div>
       <h3>{x.title}</h3>
+      {x.reminder_status && reminderDate && (
+        <p>🔔 {REMINDER_LABELS[x.reminder_status]} · {reminderDate}</p>
+      )}
       <p>{x.original_text}</p>
       {(x.tags || []).length > 0 && (
         <div className="entrytags">{x.tags.map((t) => <span key={t} className="mini">{t}</span>)}</div>

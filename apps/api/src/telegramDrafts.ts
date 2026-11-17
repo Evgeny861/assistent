@@ -38,7 +38,7 @@ export function telegramDrafts(db: Database) {
 
   const confirm = db.transaction((owner: string, revision: string) => {
     const draft = get(owner);
-    if (draft?.revision !== revision || !draft.state.source) return;
+    if (draft?.revision !== revision || !draft.state.source || draft.state.reminder) return;
     const decision = getDecision(draft);
     if (decision?.action !== 'draft') return;
     const entry = addEntry(owner, draft.state.originalText, db, {
@@ -49,10 +49,30 @@ export function telegramDrafts(db: Database) {
     return entry;
   });
 
+  const schedule = db.prepare(`
+    INSERT INTO reminders (entry_id, owner_id, chat_id, due_at, time_zone, next_attempt_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `);
+  const confirmReminder = db.transaction((owner: string, revision: string, chatId: number) => {
+    const draft = get(owner);
+    const reminder = draft?.state.reminder;
+    if (draft?.revision !== revision || !reminder || reminder.question || !reminder.draft.dueAt) return;
+    const { dueAt, timeZone, title } = reminder.draft;
+    if (dueAt <= Date.now()) return { expired: true } as const;
+    const entry = addEntry(owner, draft.state.originalText, db, {
+      classification: { title, kind: 'task', tags: [], confidence: 1 },
+      source: 'rules',
+    });
+    schedule.run(entry.id, owner, chatId, dueAt, timeZone, dueAt);
+    remove.run(owner, revision);
+    return { expired: false, title, dueAt, timeZone } as const;
+  });
+
   return {
     get,
     begin,
     confirm,
+    confirmReminder,
     claim: (id: number) => claimUpdate.run(id, new Date().toISOString()).changes === 1,
     update: (owner: string, revision: string, state: ConversationState) => update.run(JSON.stringify(state), owner, revision).changes === 1,
     attach: (owner: string, revision: string, messageId: number) => attach.run(messageId, owner, revision).changes === 1,
