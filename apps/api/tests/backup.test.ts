@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, ChildProcess } from 'node:child_process';
-import { mkdtempSync, rmSync, existsSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -26,9 +26,8 @@ async function startServer(dbFile: string): Promise<{ proc: ChildProcess; base: 
       PORT: String(port),
       HOST: '127.0.0.1',
       DB_PATH: dbFile,
-      // initData auth needs a bot token; the test token never reaches Telegram
-      // (bot start fails on getMe and is caught, see src/index.ts).
       TELEGRAM_BOT_TOKEN: BOT_TOKEN,
+      TELEGRAM_ALLOWED_USER_IDS: '',
       DEV_AUTH_BYPASS: '',    // real initData auth, no bypass
       GEMINI_API_KEY: '',
       LOG_LEVEL: 'warn',
@@ -68,7 +67,7 @@ async function j(method: string, url: string, body: unknown = undefined, headers
   return { status: res.status, data, res };
 }
 
-test('WAL-safe backup endpoint + restore via backup.mjs on a live DB', async (t) => {
+test('WAL-safe CLI backup and restore, with no public full-database export', async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'ideaflow-backup-data-'));
   const dbFile = join(dir, 'live.db');
   const s = await startServer(dbFile);
@@ -80,23 +79,10 @@ test('WAL-safe backup endpoint + restore via backup.mjs on a live DB', async (t)
   const b = await j('POST', s.base + '/api/entries', { text: 'бэкап-заметка 2' }, HDR);
   assert.equal(b.status, 200);
 
-  // Unauthenticated backup is rejected (data is not public).
-  assert.equal((await j('GET', s.base + '/api/backup')).status, 401);
-
-  // Authenticated backup returns a DB file. (Plain fetch: the `j()` helper
-  // consumes the body via res.json(), which would make arrayBuffer() fail.)
-  const bk = await fetch(s.base + '/api/backup', { headers: HDR });
-  assert.equal(bk.status, 200);
-  assert.equal(bk.headers.get('content-disposition')?.includes('attachment'), true);
-  const bytes = Buffer.from(await bk.arrayBuffer());
-  assert.ok(bytes.length > 0, 'backup must not be empty');
-  // The SQLite header must be present (a real DB file, not JSON or an error page).
-  // The magic is 16 bytes: "SQLite format 3" + NUL.
-  assert.equal(bytes.subarray(0, 16).toString('utf8'), 'SQLite format 3\x00');
+  assert.equal((await j('GET', s.base + '/api/backup', undefined, HDR)).status, 404);
 
   const bakFile = join(dir, 'backup.db');
   const restoredFile = join(dir, 'restored.db');
-  writeFileSync(bakFile, bytes);
   const cli = (args: string[]) => new Promise<number>((res2) => {
     const p = spawn(process.execPath, [backupScript, ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '';
@@ -105,6 +91,9 @@ test('WAL-safe backup endpoint + restore via backup.mjs on a live DB', async (t)
     p.on('exit', (code) => res2(code ?? 1));
     p.on('error', () => res2(1));
   });
+  assert.equal(await cli(['backup', dbFile, bakFile]), 0, 'backup from a live WAL DB must succeed');
+  const bytes = readFileSync(bakFile);
+  assert.equal(bytes.subarray(0, 16).toString('utf8'), 'SQLite format 3\x00');
   const restoreExit = await cli(['restore', bakFile, restoredFile]);
   assert.equal(restoreExit, 0, 'restore must succeed');
   assert.ok(existsSync(restoredFile));

@@ -1,0 +1,77 @@
+name: Deploy Recall
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: recall-vps-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Build and deploy on VPS
+        shell: bash
+        env:
+          VPS_HOST: ${{ secrets.RECALL_SSH_HOST }}
+          VPS_USER: ${{ secrets.RECALL_SSH_USER }}
+          VPS_KEY: ${{ secrets.RECALL_SSH_PRIVATE_KEY }}
+          VPS_KNOWN_HOSTS: ${{ secrets.RECALL_SSH_KNOWN_HOSTS }}
+          VPS_PORT: ${{ vars.RECALL_SSH_PORT || '22' }}
+          DEPLOY_PATH: ${{ vars.RECALL_DEPLOY_PATH || '/opt/recall' }}
+        run: |
+          set -euo pipefail
+
+          : "${VPS_HOST:?Set RECALL_SSH_HOST}"
+          : "${VPS_USER:?Set RECALL_SSH_USER}"
+          : "${VPS_KEY:?Set RECALL_SSH_PRIVATE_KEY}"
+          : "${VPS_KNOWN_HOSTS:?Set RECALL_SSH_KNOWN_HOSTS}"
+
+          umask 077
+          ssh_dir="$(mktemp -d)"
+          trap 'rm -rf -- "$ssh_dir"' EXIT
+          printf '%s\n' "$VPS_KEY" | tr -d '\r' > "$ssh_dir/key"
+          printf '%s\n' "$VPS_KNOWN_HOSTS" | tr -d '\r' > "$ssh_dir/known_hosts"
+          printf -v command 'bash -s -- %q' "$DEPLOY_PATH"
+
+          ssh -T -F /dev/null -i "$ssh_dir/key" -p "$VPS_PORT" \
+            -o BatchMode=yes -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$ssh_dir/known_hosts" \
+            -o GlobalKnownHostsFile=/dev/null \
+            -o ConnectTimeout=15 -o ServerAliveInterval=20 -o ServerAliveCountMax=3 \
+            -- "$VPS_USER@$VPS_HOST" "$command" <<'DEPLOY'
+          set -euo pipefail
+          export GIT_TERMINAL_PROMPT=0
+
+          cd -- "$1"
+          exec 9>"$(git rev-parse --git-path recall-deploy.lock)"
+          flock -w 120 9
+
+          if [[ "$(git branch --show-current)" != main || -n "$(git status --porcelain)" ]]; then
+            echo 'Deployment directory must be a clean checkout of main.' >&2
+            exit 1
+          fi
+
+          # Always fetch the current tip, even if this job queued before a newer push.
+          git fetch --no-tags origin main
+          target="$(git rev-parse FETCH_HEAD)"
+          git merge --ff-only "$target"
+          if [[ "$(git rev-parse HEAD)" != "$target" ]]; then
+            echo 'Local main does not match origin main. Check the VPS checkout.' >&2
+            exit 1
+          fi
+
+          # Finish building before replacing the running container.
+          docker compose build ideaflow
+          docker compose up -d --no-build --wait --wait-timeout 120 ideaflow
+          docker compose ps ideaflow
+          printf 'Deployed Recall at %s\n' "$target"
+          DEPLOY

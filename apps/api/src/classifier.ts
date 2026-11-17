@@ -3,7 +3,7 @@ import { z } from 'zod';
 
 // Classification is OPTIONAL and never blocks saving.
 // Deterministic rules first (this is not AI); Gemini behind the same interface when configured.
-// On provider failure: entry keeps ai_state='pending' and its original text.
+// On provider failure, use the offline rules. The original text is always preserved.
 
 export const KINDS = ['note', 'idea', 'wish', 'task', 'event', 'purchase'] as const;
 export type Kind = (typeof KINDS)[number];
@@ -18,7 +18,7 @@ export const classificationSchema = z.object({
 export type Classification = z.infer<typeof classificationSchema>;
 
 export interface Classifier {
-  name: string;
+  name: 'gemini' | 'rules';
   classify(text: string, existingProjects: string[]): Promise<Classification | null>;
 }
 
@@ -30,7 +30,7 @@ export const projectAllowlist: string[] = (process.env.PROJECT_ALLOWLIST || '')
 // Simple deterministic fallback: explicit prefixes and Russian/English keywords.
 // Deterministic and offline; never throws.
 export const deterministicClassifier: Classifier = {
-  name: 'deterministic',
+  name: 'rules',
   async classify(text: string): Promise<Classification | null> {
     const t = text.trim();
     if (!t) return null;
@@ -73,7 +73,7 @@ export const deterministicClassifier: Classifier = {
 // Optional Gemini provider. Used only when GEMINI_API_KEY is set.
 // ~10s timeout, single attempt (1 retry on 429/5xx), fail-open to null.
 export class GeminiClassifier implements Classifier {
-  name = 'gemini';
+  readonly name = 'gemini';
   private key: string;
   constructor() {
     this.key = process.env.GEMINI_API_KEY || '';
@@ -83,8 +83,8 @@ export class GeminiClassifier implements Classifier {
   }
   async classify(text: string, existingProjects: string[]): Promise<Classification | null> {
     if (!this.enabled || !text.trim()) return null;
-    const model = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
-    const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(this.key)}`;
+    const model = process.env.GEMINI_MODEL || 'gemini-3.5-flash';
+    const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
     const prompt = [
       'You are a personal-memory assistant. Classify the user note below.',
       'Allowed kinds: ' + KINDS.join(', ') + '.',
@@ -98,7 +98,7 @@ export class GeminiClassifier implements Classifier {
       try {
         const res = await fetch(endpoint, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', 'x-goog-api-key': this.key },
           body: JSON.stringify({
             contents: [{ parts: [{ text: prompt }] }],
             generationConfig: { responseMimeType: 'application/json', temperature: 0.1 },
@@ -131,9 +131,9 @@ export function getClassifier(): Classifier {
 }
 
 // Run the primary classifier, returning null on any failure. Never throws.
-async function safeClassify(text: string, existing: string[]): Promise<Classification | null> {
+async function safeClassify(classifier: Classifier, text: string, existing: string[]): Promise<Classification | null> {
   try {
-    return await getClassifier().classify(text, existing);
+    return await classifier.classify(text, existing);
   } catch {
     return null;
   }
@@ -150,10 +150,12 @@ export async function classifyEntry(entry: { id: string; owner_id: string; origi
   try {
     const existing = db.prepare('SELECT DISTINCT project FROM entries WHERE owner_id = ? AND project != \'Inbox\'').all(entry.owner_id) as { project: string }[];
     const existingProjects = existing.map((r) => r.project);
-    let result = await safeClassify(entry.original_text, existingProjects);
-    if (!result) {
-      // Requirement: when the external AI is unavailable, use the deterministic classifier.
-      try { result = await deterministicClassifier.classify(entry.original_text, existingProjects); } catch { /* stays null */ }
+    const classifier = getClassifier();
+    let source = classifier.name;
+    let result = await safeClassify(classifier, entry.original_text, existingProjects);
+    if (!result && classifier !== deterministicClassifier) {
+      result = await safeClassify(deterministicClassifier, entry.original_text, existingProjects);
+      source = deterministicClassifier.name;
     }
     if (!result) return 'failed';
     let project = result.project;
@@ -165,8 +167,15 @@ export async function classifyEntry(entry: { id: string; owner_id: string; origi
     }
     const now = new Date().toISOString();
     const tags = result.tags.length ? JSON.stringify(result.tags) : entry.tags;
-    const res = db.prepare('UPDATE entries SET title=?, kind=?, project=?, tags=?, ai_state=\'done\', updated_at=? WHERE id=? AND owner_id=? AND ai_state=\'pending\' AND updated_at=?')
-      .run(result.title, result.kind, project || entry.project, tags, now, entry.id, entry.owner_id, entry.updated_at);
+    const res = db.prepare(`
+      UPDATE entries SET
+        title = CASE WHEN json_extract(manual_fields, '$.title') THEN title ELSE ? END,
+        kind = CASE WHEN json_extract(manual_fields, '$.kind') THEN kind ELSE ? END,
+        project = CASE WHEN json_extract(manual_fields, '$.project') THEN project ELSE ? END,
+        tags = CASE WHEN json_extract(manual_fields, '$.tags') THEN tags ELSE ? END,
+        ai_state = 'done', classification_source = ?, updated_at = ?
+      WHERE id = ? AND owner_id = ? AND ai_state = 'pending' AND updated_at = ?
+    `).run(result.title, result.kind, project || entry.project, tags, source, now, entry.id, entry.owner_id, entry.updated_at);
     return res.changes > 0 ? 'done' : 'skipped';
   } catch {
     return 'failed'; // fail-open: entry stays pending, original text untouched

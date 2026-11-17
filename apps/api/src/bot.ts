@@ -1,6 +1,7 @@
 import { Bot } from 'grammy';
 import type { Database } from 'better-sqlite3';
 import { addEntry } from './db.js';
+import { isTelegramUserAllowed } from './auth.js';
 
 export interface TelegramBotLog {
   info: (msg: string) => void;
@@ -33,21 +34,28 @@ export function startTelegramBot({ token, db, log, webOrigin, apiBaseURL, onEntr
   const miniAppButton = webOrigin
     ? { reply_markup: { inline_keyboard: [[{ text: '📂 Открыть приложение', web_app: { url: webOrigin } }]] } }
     : undefined;
+  bot.use(async (ctx, next) => {
+    if (ctx.chat?.type !== 'private' || !ctx.from || !isTelegramUserAllowed(String(ctx.from.id))) return;
+    await next();
+  });
   bot.command('start', (ctx) =>
     ctx.reply('Отправь мне мысль — я сохраню её во входящие и автоматически разберу. Приложение открывается кнопкой ниже.', miniAppButton));
   bot.command('help', (ctx) =>
     ctx.reply('Просто отправляйте текст — каждая мысль сохраняется как запись (оригинал никогда не меняется). Кнопка «Открыть приложение» ведёт в Mini App: просмотр, поиск, редактирование, экспорт. Команды: /start, /help.', miniAppButton));
   const claimUpdate = db.prepare('INSERT OR IGNORE INTO tg_updates (update_id, processed_at) VALUES (?, ?)');
+  const saveUpdate = db.transaction((updateId: number, owner: string, text: string) => {
+    const claim = claimUpdate.run(updateId, new Date().toISOString());
+    if (claim.changes === 0) return false;
+    addEntry(owner, text, db);
+    return true;
+  });
   bot.on('message:text', async (ctx) => {
-    if (ctx.chat.type !== 'private') return; // group mode is not supported
     const userId = ctx.from?.id;
     if (typeof userId !== 'number') return;
-    const claim = claimUpdate.run(ctx.update.update_id, new Date().toISOString());
-    if (claim.changes === 0) return; // this update was already saved
     const text = ctx.message.text.trim();
     if (!text || text.startsWith('/')) return;
     if (text.length > 4096) return void ctx.reply('Слишком длинное сообщение, разбейте его на части.');
-    addEntry(String(userId), text); // committed synchronously; AiWorker classifies it
+    if (!saveUpdate(ctx.update.update_id, String(userId), text)) return;
     onEntrySaved?.(); // wake the AiWorker so classification is prompt
     // Acknowledge only after the entry is committed to SQLite (addEntry is synchronous).
     await ctx.reply('✅ Сохранено во входящие');

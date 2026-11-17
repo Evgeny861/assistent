@@ -22,6 +22,7 @@ COPY apps/web/package.json apps/web/package.json
 # No other prod dependency has install scripts (verified in package-lock.json).
 RUN npm ci --omit=dev --ignore-scripts
 COPY --from=build /app/apps/api/dist /app/apps/api/dist
+COPY --from=build /app/apps/api/backup.mjs /app/apps/api/backup.mjs
 COPY --from=build /app/apps/web/dist /app/apps/web/dist
 RUN mkdir -p /data
 EXPOSE 3000

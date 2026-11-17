@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-// In-process AI worker tests on a real SQLite DB (deterministic classifier only).
+// In-process worker tests on a real SQLite DB and a simulated Gemini response.
 const NOW = () => new Date().toISOString();
 const UUID1 = 'aaaaaaaa-0000-4000-8000-000000000001';
 const UUID2 = 'bbbbbbbb-0000-4000-8000-000000000002';
@@ -21,7 +21,13 @@ async function waitFor(cond: () => boolean, ms: number): Promise<void> {
 test('AI worker: crash recovery, backoff without fast retries, max attempts, concurrency guards', async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'ideaflow-ai-test-'));
   process.env.DB_PATH = join(dir, 'ai.db');
-  process.env.GEMINI_API_KEY = ''; // deterministic classifier only
+  process.env.GEMINI_API_KEY = 'test-key';
+  let geminiAvailable = false;
+  t.mock.method(globalThis, 'fetch', async () => {
+    if (!geminiAvailable) return new Response(null, { status: 404 });
+    const classification = { title: 'План для VPN', kind: 'idea', tags: [], confidence: 1 };
+    return Response.json({ candidates: [{ content: { parts: [{ text: JSON.stringify(classification) }] } }] });
+  });
   const { db, closeDb } = await import('../src/db.js');
   const { AiWorker } = await import('../src/aiWorker.js');
   const { classifyEntry } = await import('../src/classifier.js');
@@ -40,15 +46,19 @@ test('AI worker: crash recovery, backoff without fast retries, max attempts, con
   const r1 = getRow(UUID1)!;
   assert.equal(r1.original_text, 'Идея: переключить VPN', 'original_text must never change');
   assert.equal(r1.kind, 'idea');
+  assert.equal(r1.classification_source, 'rules', 'provider outage must be visible as rules fallback');
   assert.equal(r1.ai_attempts, 0, 'a successful classification does not count as an attempt');
 
   // 2) A second worker instance (simulated restart) recovers another pending row.
+  geminiAvailable = true;
   ins.run(UUID2, '9', 'задача: написать отчёт', 'задача: написать отчёт', 'note', 'Inbox', 'inbox', '[]', 'pending', 0, '', NOW(), NOW());
   const w2 = new AiWorker(db, { pollMs: 50 });
   w2.start();
   await waitFor(() => getRow(UUID2)?.ai_state === 'done', 10_000);
   w2.stop();
-  assert.equal(getRow(UUID2)!.kind, 'task');
+  assert.equal(getRow(UUID2)!.kind, 'idea');
+  assert.equal(getRow(UUID2)!.classification_source, 'gemini');
+  geminiAvailable = false;
 
   // 3) Backoff: a row that cannot be classified (empty text defeats both classifiers)
   //    gets next_ai_at in the future and is NOT retried immediately (no fast retry loop).

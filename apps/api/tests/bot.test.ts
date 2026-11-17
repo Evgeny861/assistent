@@ -59,6 +59,7 @@ test('Telegram bot (mocked API): save, dedup, group rejection, /start', async (t
   const dir = mkdtempSync(join(tmpdir(), 'ideaflow-bot-test-'));
   process.env.DB_PATH = join(dir, 'bot.db');
   process.env.GEMINI_API_KEY = ''; // deterministic classifier only
+  process.env.TELEGRAM_ALLOWED_USER_IDS = '111';
   const { db, closeDb } = await import('../src/db.js');
   const { startTelegramBot } = await import('../src/bot.js');
 
@@ -138,4 +139,23 @@ test('Telegram bot (mocked API): save, dedup, group rejection, /start', async (t
   while (sentMessages.length <= before && Date.now() < d4) await new Promise((r) => setTimeout(r, 100));
   assert.ok(sentMessages.length > before, '/start must produce a reply');
   assert.equal(countEntries('111'), 1, '/start must not create an entry');
+
+  // A Telegram user outside the allowlist cannot create an entry.
+  queue.push(privateText(4, 222, 'Чужая заметка'));
+  // Cause SQLite to fail after the dedup mark is inserted into the transaction.
+  db.exec(`CREATE TRIGGER fail_capture BEFORE INSERT ON entries
+    WHEN NEW.original_text = 'Повторная доставка' BEGIN SELECT RAISE(ABORT, 'test write failure'); END`);
+  queue.push(privateText(5, 111, 'Повторная доставка'));
+  const failureDeadline = Date.now() + 4000;
+  while (!sentMessages.some((m) => m.includes('Не получилось')) && Date.now() < failureDeadline) {
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  assert.ok(sentMessages.some((m) => m.includes('Не получилось')));
+  assert.equal(countEntries('222'), 0);
+  assert.equal(db.prepare('SELECT 1 FROM tg_updates WHERE update_id = 5').get(), undefined);
+  db.exec('DROP TRIGGER fail_capture');
+  queue.push(privateText(5, 111, 'Повторная доставка'));
+  const retryDeadline = Date.now() + 4000;
+  while (countEntries('111') < 2 && Date.now() < retryDeadline) await new Promise((r) => setTimeout(r, 50));
+  assert.equal(countEntries('111'), 2, 'the rolled back update can be accepted on retry');
 });

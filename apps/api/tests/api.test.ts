@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, ChildProcess } from 'node:child_process';
+import { createHmac } from 'node:crypto';
+import Database from 'better-sqlite3';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -25,6 +27,7 @@ async function startServer(env: Record<string, string | undefined> = {}, dbPath?
       HOST: '127.0.0.1',
       DB_PATH: dbFile,
       TELEGRAM_BOT_TOKEN: BOT_TOKEN,
+      TELEGRAM_ALLOWED_USER_IDS: env.TELEGRAM_ALLOWED_USER_IDS ?? '',
       DEV_AUTH_BYPASS: env.DEV_AUTH_BYPASS ?? '',
       PROJECT_ALLOWLIST: env.PROJECT_ALLOWLIST ?? '',
       GEMINI_API_KEY: '',
@@ -146,6 +149,51 @@ test('Telegram initData: CRUD, owner isolation, forged/expired/empty rejected', 
   // Valid patch by owner
   const patch = await j('PATCH', base + `/api/entries/${id}`, { status: 'done' }, { 'x-telegram-init-data': initA() });
   assert.equal(patch.status, 200);
+});
+
+test('Mini App accepts bot-token HMAC with signature and enforces the owner allowlist', async (t) => {
+  const { base, cleanup } = await startServer({ NODE_ENV: 'production', TELEGRAM_ALLOWED_USER_IDS: '111' });
+  t.after(cleanup);
+  const authDate = String(Math.floor(Date.now() / 1000));
+  const signature = 'telegram-signature-fixture';
+  const user = JSON.stringify(USER_A);
+  const check = ['auth_date=' + authDate, 'signature=' + signature, 'user=' + user].join('\n');
+  const key = createHmac('sha256', 'WebAppData').update(BOT_TOKEN).digest();
+  const hash = createHmac('sha256', key).update(check).digest('hex');
+  const initData = new URLSearchParams({ signature, hash, user, auth_date: authDate }).toString();
+  assert.equal((await j('GET', base + '/api/entries', undefined, { 'x-telegram-init-data': initData })).status, 200);
+  assert.equal((await j('GET', base + '/api/entries', undefined, { 'x-telegram-init-data': initB() })).status, 403);
+});
+
+test('manual fields survive background classification of a pending entry', async (t) => {
+  const { base, cleanup, dbPath } = await startServer();
+  t.after(cleanup);
+  const db = new Database(dbPath);
+  try {
+    const id = 'aaaaaaaa-0000-4000-8000-000000000001';
+    const now = new Date().toISOString();
+    db.prepare(`INSERT INTO entries (id, owner_id, original_text, title, created_at, updated_at, next_ai_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)`).run(id, '111', 'Идея: настроить мониторинг #авто', 'Исходный заголовок', now, now, '2999-01-01');
+    const headers = { 'x-telegram-init-data': initA() };
+    const patch = await j('PATCH', base + '/api/entries/' + id, { title: 'Мой заголовок', tags: [], project: 'Работа' }, headers);
+    assert.equal(patch.status, 200);
+    db.prepare("UPDATE entries SET next_ai_at = '' WHERE id = ?").run(id);
+    // A second capture wakes the real worker immediately.
+    assert.equal((await j('POST', base + '/api/entries', { text: 'Разбудить воркер' }, headers)).status, 200);
+    const read = db.prepare('SELECT title, tags, project, kind, ai_state, classification_source FROM entries WHERE id = ?');
+    const deadline = Date.now() + 7000;
+    let row = read.get(id) as Record<string, unknown>;
+    while (row.ai_state !== 'done' && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      row = read.get(id) as Record<string, unknown>;
+    }
+    assert.deepEqual(row, {
+      title: 'Мой заголовок', tags: '[]', project: 'Работа',
+      kind: 'idea', ai_state: 'done', classification_source: 'rules',
+    });
+  } finally {
+    db.close();
+  }
 });
 
 test('input validation', async (t) => {

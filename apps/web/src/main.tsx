@@ -5,7 +5,7 @@ import './style.css';
 
 type Entry = {
   id: string; original_text: string; title: string; kind: string;
-  project: string; status: string; tags: string[]; ai_state: string; created_at: string;
+  project: string; status: string; tags: string[]; ai_state: string; classification_source: 'gemini' | 'rules' | null; created_at: string;
 };
 
 declare global {
@@ -31,9 +31,11 @@ const headers = () => ({
 async function api(path: string, options: RequestInit = {}) {
   const r = await fetch('/api' + path, { ...options, headers: { ...headers(), ...options.headers } });
   if (!r.ok) {
-    const e = new Error(r.status === 401
-      ? 'Требуется вход через Telegram'
-      : `Ошибка API: ${r.status}`);
+    const messages: Record<number, string> = {
+      401: 'Требуется вход через Telegram',
+      403: 'У этого аккаунта нет доступа к Recall',
+    };
+    const e = new Error(messages[r.status] ?? `Ошибка API: ${r.status}`);
     (e as Error & { status?: number }).status = r.status;
     throw e;
   }
@@ -56,12 +58,13 @@ function Card({ x, onChanged, onDelete }: { x: Entry; onChanged: () => void; onD
     const next = JSON.stringify(arr);
     if (next !== JSON.stringify(x.tags || [])) void send({ tags: arr } as Record<string, unknown>);
   };
+  const labels = { gemini: 'Разобрано Gemini', rules: 'Разобрано по правилам' };
   return (
     <article className="entry">
       <div className="entryhead">
         <span className="tag">{x.project}</span>
         <span className={'badge ' + (x.ai_state === 'done' ? 'ok' : x.ai_state === 'failed' ? 'err' : 'wait')}>
-          {x.ai_state === 'done' ? 'Разобрано' : x.ai_state === 'failed' ? 'Не разобрано' : 'Ожидает разбор'}
+          {x.ai_state === 'done' ? (x.classification_source ? labels[x.classification_source] : 'Разобрано') : x.ai_state === 'failed' ? 'Не разобрано' : 'Ожидает разбор'}
         </span>
         <span className="date">{new Date(x.created_at).toLocaleDateString('ru-RU')}</span>
       </div>
@@ -102,20 +105,6 @@ function App() {
   const [authError, setAuthError] = useState(false);
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
-  // TEMP DEBUG: client-side initData fingerprint (no raw content), to compare with server-side.
-  const [diag, setDiag] = useState('');
-  useEffect(() => {
-    const id = window.Telegram?.WebApp?.initData || '';
-    if (!id) { setDiag('initData:(пусто)'); return; }
-    const hashField = new URLSearchParams(id).get('hash') || '';
-    crypto.subtle.digest('SHA-256', new TextEncoder().encode(id))
-      .then((buf) => {
-        const hex = Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, '0')).join('');
-        setDiag(`len=${id.length} hash=${hashField.slice(0, 12)} sha256=${hex.slice(0, 12)}`);
-      })
-      .catch(() => setDiag(`len=${id.length} hash=${hashField.slice(0, 12)} sha=err`));
-  }, []);
-
   async function refresh() {
     try {
       setItems(await api('/entries'));
@@ -173,9 +162,7 @@ function App() {
         {authError && (
           <div className="error authbanner">
             Данные недоступны: нужно авторизоваться через Telegram.
-            Откройте это приложение кнопкой меню бота (или /start). Локальная проверка initData истекла.
-            <br />
-            <span style={{ font: '12px monospace', opacity: 0.85 }}>dx {diag}</span>
+            Закройте приложение и откройте его заново через меню бота или кнопку в ответе на /start.
           </div>
         )}
         <section className="hero">

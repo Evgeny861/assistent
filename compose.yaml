@@ -9,6 +9,10 @@ services:
       DB_PATH: /data/ideaflow.db
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
       WEB_ORIGIN: ${WEB_ORIGIN}
+      TELEGRAM_ALLOWED_USER_IDS: ${TELEGRAM_ALLOWED_USER_IDS:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.5-flash}
+      PROJECT_ALLOWLIST: ${PROJECT_ALLOWLIST:-}
       DEV_AUTH_BYPASS: 'false'
     volumes:
       - ideaflow_data:/data

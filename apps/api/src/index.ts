@@ -1,16 +1,13 @@
-import 'dotenv/config';
+import './env.js';
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import fastifyStatic from '@fastify/static';
 import { Bot } from 'grammy';
-import { existsSync, readFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { db, listEntries, addEntry, closeDb } from './db.js';
-import { resolveOwner } from './auth.js';
+import { isTelegramUserAllowed, resolveOwner } from './auth.js';
 import { getClassifier, KINDS } from './classifier.js';
 import { RateLimiter } from './rateLimit.js';
 import { AiWorker } from './aiWorker.js';
@@ -72,6 +69,10 @@ app.addHook('preHandler', async (req, reply) => {
     reply.code(401).send({ error: 'Требуется аутентификация Telegram (Mini App)' });
     return;
   }
+  if (owner !== 'local-dev' && !isTelegramUserAllowed(owner)) {
+    reply.code(403).send({ error: 'У этого аккаунта нет доступа к Recall' });
+    return;
+  }
   (req as typeof req & { ownerId: string }).ownerId = owner;
 });
 
@@ -84,21 +85,6 @@ app.get('/api/entries', async (req) =>
 app.get('/api/entries/export', async (req) => {
   const owner = (req as typeof req & { ownerId: string }).ownerId;
   return { app: 'ideaflow', version: 1, exported_at: new Date().toISOString(), owner_id: owner, entries: listEntries(owner).map((e) => ({ ...e, tags: JSON.parse(e.tags) })) };
-});
-
-// WAL-safe SQLite backup: VACUUM INTO produces a consistent single-file snapshot
-// of the live database (no raw file copy). Auth-protected like every /api route.
-app.get('/api/backup', async (req, reply) => {
-  const tmp = join(tmpdir(), `ideaflow-backup-${randomUUID()}.db`);
-  try {
-    db.exec(`VACUUM INTO '${tmp.replace(/'/g, "''")}'`);
-    const buf = readFileSync(tmp);
-    reply.header('content-type', 'application/octet-stream');
-    reply.header('content-disposition', `attachment; filename="ideaflow-${new Date().toISOString().slice(0, 10)}.db"`);
-    return buf;
-  } finally {
-    try { rmSync(tmp, { force: true }); } catch { /* already removed */ }
-  }
 });
 
 app.post('/api/entries', async (req, reply) => {
@@ -122,8 +108,10 @@ app.patch('/api/entries/:id', async (req, reply) => {
   if (fields.length) {
     const sql = fields.map(([k]) => `${k} = ?`).join(', ');
     const values = fields.map(([k, v]) => (k === 'tags' ? JSON.stringify(v as string[]) : v));
-    db.prepare(`UPDATE entries SET ${sql}, updated_at = ? WHERE id = ? AND owner_id = ?`)
-      .run(...values, new Date().toISOString(), params.data.id, owner);
+    const manualFields = Object.fromEntries(fields.filter(([key]) => key !== 'status').map(([key]) => [key, true]));
+    db.prepare(`UPDATE entries SET ${sql}, manual_fields = json_patch(manual_fields, ?), updated_at = ?
+      WHERE id = ? AND owner_id = ?`)
+      .run(...values, JSON.stringify(manualFields), new Date().toISOString(), params.data.id, owner);
   }
   return { ok: true };
 });

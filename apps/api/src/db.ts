@@ -67,6 +67,18 @@ const migrations: Migration[] = [
       db.exec('CREATE TABLE IF NOT EXISTS tg_updates (update_id INTEGER PRIMARY KEY, processed_at TEXT NOT NULL)');
     },
   },
+  {
+    version: 5,
+    up: () => {
+      db.exec(`
+        ALTER TABLE entries ADD COLUMN manual_fields TEXT NOT NULL DEFAULT '{}';
+        ALTER TABLE entries ADD COLUMN classification_source TEXT;
+        -- Older pending rows that changed may contain manual edits. Preserve all their existing fields.
+        UPDATE entries SET manual_fields = '{"title":true,"kind":true,"project":true,"tags":true}'
+          WHERE ai_state = 'pending' AND updated_at <> created_at;
+      `);
+    },
+  },
 ];
 function migrate() {
   db.exec('CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)');
@@ -84,23 +96,23 @@ migrate();
 export type Entry = {
   id: string; owner_id: string; original_text: string; title: string;
   kind: string; project: string; status: string; tags: string;
-  ai_state: string; created_at: string; updated_at: string;
+  ai_state: string; classification_source: 'gemini' | 'rules' | null; created_at: string; updated_at: string;
 };
 const INSERT_SQL = `INSERT INTO entries (id,owner_id,original_text,title,kind,project,status,tags,ai_state,created_at,updated_at)
   VALUES (@id,@owner_id,@original_text,@title,@kind,@project,@status,@tags,@ai_state,@created_at,@updated_at)`;
-const SELECT_SQL = 'SELECT id, owner_id, original_text, title, kind, project, status, tags, ai_state, created_at, updated_at FROM entries WHERE owner_id = ? ORDER BY created_at DESC';
+const SELECT_SQL = 'SELECT id, owner_id, original_text, title, kind, project, status, tags, ai_state, classification_source, created_at, updated_at FROM entries WHERE owner_id = ? ORDER BY created_at DESC';
 export function listEntries(owner: string): Entry[] {
   return db.prepare(SELECT_SQL).all(owner) as Entry[];
 }
-export function addEntry(owner: string, text: string): Entry {
+export function addEntry(owner: string, text: string, database = db): Entry {
   const now = new Date().toISOString();
   const entry: Entry = {
     id: randomUUID(), owner_id: owner, original_text: text,
     title: text.trim().slice(0, 90), kind: 'note', project: 'Inbox',
-    status: 'inbox', tags: '[]', ai_state: 'pending',
+    status: 'inbox', tags: '[]', ai_state: 'pending', classification_source: null,
     created_at: now, updated_at: now,
   };
-  db.prepare(INSERT_SQL).run(entry);
+  database.prepare(INSERT_SQL).run(entry);
   return entry;
 }
 export function closeDb() {
