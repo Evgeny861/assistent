@@ -2,6 +2,7 @@ import Database from 'better-sqlite3';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import type { Classification, Classifier } from './classifier.js';
 
 const file = process.env.DB_PATH || './data/ideaflow.db';
 mkdirSync(dirname(file), { recursive: true });
@@ -79,6 +80,19 @@ const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 6,
+    up: () => {
+      db.exec(`
+        CREATE TABLE telegram_drafts (
+          owner_id TEXT PRIMARY KEY,
+          revision TEXT NOT NULL,
+          message_id INTEGER,
+          state TEXT NOT NULL
+        );
+      `);
+    },
+  },
 ];
 function migrate() {
   db.exec('CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)');
@@ -98,18 +112,26 @@ export type Entry = {
   kind: string; project: string; status: string; tags: string;
   ai_state: string; classification_source: 'gemini' | 'rules' | null; created_at: string; updated_at: string;
 };
-const INSERT_SQL = `INSERT INTO entries (id,owner_id,original_text,title,kind,project,status,tags,ai_state,created_at,updated_at)
-  VALUES (@id,@owner_id,@original_text,@title,@kind,@project,@status,@tags,@ai_state,@created_at,@updated_at)`;
+const INSERT_SQL = `INSERT INTO entries (id,owner_id,original_text,title,kind,project,status,tags,ai_state,classification_source,created_at,updated_at)
+  VALUES (@id,@owner_id,@original_text,@title,@kind,@project,@status,@tags,@ai_state,@classification_source,@created_at,@updated_at)`;
 const SELECT_SQL = 'SELECT id, owner_id, original_text, title, kind, project, status, tags, ai_state, classification_source, created_at, updated_at FROM entries WHERE owner_id = ? ORDER BY created_at DESC';
 export function listEntries(owner: string): Entry[] {
   return db.prepare(SELECT_SQL).all(owner) as Entry[];
 }
-export function addEntry(owner: string, text: string, database = db): Entry {
+export function addEntry(
+  owner: string,
+  text: string,
+  database = db,
+  completed?: { classification: Classification; source: Classifier['name'] },
+): Entry {
   const now = new Date().toISOString();
+  const classification = completed?.classification;
   const entry: Entry = {
     id: randomUUID(), owner_id: owner, original_text: text,
-    title: text.trim().slice(0, 90), kind: 'note', project: 'Inbox',
-    status: 'inbox', tags: '[]', ai_state: 'pending', classification_source: null,
+    title: classification?.title ?? text.trim().slice(0, 90),
+    kind: classification?.kind ?? 'note', project: classification?.project ?? 'Inbox',
+    status: 'inbox', tags: JSON.stringify(classification?.tags ?? []),
+    ai_state: completed ? 'done' : 'pending', classification_source: completed?.source ?? null,
     created_at: now, updated_at: now,
   };
   database.prepare(INSERT_SQL).run(entry);

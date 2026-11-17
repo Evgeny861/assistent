@@ -43,6 +43,7 @@ async function api(path: string, options: RequestInit = {}) {
 }
 
 function Card({ x, onChanged, onDelete }: { x: Entry; onChanged: () => void; onDelete: (id: string) => void }) {
+  const [editing, setEditing] = useState(false);
   const [title, setTitle] = useState(x.title);
   const [project, setProject] = useState(x.project);
   const [tags, setTags] = useState((x.tags || []).join(', '));
@@ -74,22 +75,29 @@ function Card({ x, onChanged, onDelete }: { x: Entry; onChanged: () => void; onD
         <div className="entrytags">{x.tags.map((t) => <span key={t} className="mini">{t}</span>)}</div>
       )}
       <div className="entryfoot">
-        <select value={x.kind} onChange={(e) => void send({ kind: e.target.value })} aria-label="Тип">
-          {KINDS.map((k) => <option key={k} value={k}>{KIND_LABELS[k]}</option>)}
-        </select>
-        <select value={x.status} onChange={(e) => void send({ status: e.target.value })} aria-label="Статус">
-          {STATUSES.map((k) => <option key={k} value={k}>{STATUS_LABELS[k]}</option>)}
-        </select>
+        <span className="mini">{KIND_LABELS[x.kind] ?? x.kind}</span>
+        <span className="mini">{STATUS_LABELS[x.status] ?? x.status}</span>
+        <button type="button" aria-expanded={editing} aria-controls={`entry-edit-${x.id}`} onClick={() => setEditing(!editing)}>
+          {editing ? 'Закрыть' : 'Редактировать'}
+        </button>
         <button title="Готово" onClick={() => void send({ status: 'done' })}><Check size={16} /></button>
         <button title="Архив" onClick={() => void send({ status: 'archived' })}><Archive size={16} /></button>
         <button title="Удалить" className="danger" onClick={() => { if (confirm('Удалить запись?')) onDelete(x.id); }}>
           <Trash2 size={16} />
         </button>
       </div>
-      <div className="entryedit">
-        <input value={title} onChange={(e) => setTitle(e.target.value)} onBlur={saveTitle} placeholder="Заголовок" maxLength={180} aria-label="Заголовок" />
-        <input value={project} onChange={(e) => setProject(e.target.value)} onBlur={saveProject} placeholder="Проект" maxLength={100} aria-label="Проект" />
-        <input value={tags} onChange={(e) => setTags(e.target.value)} onBlur={saveTags} placeholder="Теги через запятую" aria-label="Теги" />
+      <div id={`entry-edit-${x.id}`} hidden={!editing}>
+        {editing && <div className="entryedit">
+          <select value={x.kind} onChange={(e) => void send({ kind: e.target.value })} aria-label="Тип">
+            {KINDS.map((k) => <option key={k} value={k}>{KIND_LABELS[k]}</option>)}
+          </select>
+          <select value={x.status} onChange={(e) => void send({ status: e.target.value })} aria-label="Статус">
+            {STATUSES.map((k) => <option key={k} value={k}>{STATUS_LABELS[k]}</option>)}
+          </select>
+          <input value={title} onChange={(e) => setTitle(e.target.value)} onBlur={saveTitle} placeholder="Заголовок" maxLength={180} aria-label="Заголовок" />
+          <input value={project} onChange={(e) => setProject(e.target.value)} onBlur={saveProject} placeholder="Проект" maxLength={100} aria-label="Проект" />
+          <input value={tags} onChange={(e) => setTags(e.target.value)} onBlur={saveTags} placeholder="Теги через запятую" aria-label="Теги" />
+        </div>}
       </div>
     </article>
   );

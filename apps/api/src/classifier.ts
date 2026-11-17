@@ -82,9 +82,7 @@ export class GeminiClassifier implements Classifier {
     return !!this.key;
   }
   async classify(text: string, existingProjects: string[]): Promise<Classification | null> {
-    if (!this.enabled || !text.trim()) return null;
-    const model = process.env.GEMINI_MODEL || 'gemini-3.5-flash';
-    const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
+    if (!text.trim()) return null;
     const prompt = [
       'You are a personal-memory assistant. Classify the user note below.',
       'Allowed kinds: ' + KINDS.join(', ') + '.',
@@ -92,6 +90,13 @@ export class GeminiClassifier implements Classifier {
       'Return ONLY JSON matching: {"title":string(<=90 chars),"kind":"one of the kinds","project"?:string,"tags":string[] (max 8),"confidence":number 0..1}',
       'Note: ' + text,
     ].join('\n');
+    return this.requestJson(prompt, classificationSchema);
+  }
+
+  async requestJson<T>(prompt: string, schema: z.ZodType<T, z.ZodTypeDef, unknown>): Promise<T | null> {
+    if (!this.enabled) return null;
+    const model = process.env.GEMINI_MODEL || 'gemini-3.5-flash';
+    const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
     let attempt = 0;
     while (attempt < 2) {
       attempt += 1;
@@ -113,7 +118,7 @@ export class GeminiClassifier implements Classifier {
         const data = (await res.json()) as { candidates?: { content?: { parts?: { text?: string }[] } }[] };
         const raw = data.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('') || '';
         const json = raw.startsWith('```') ? raw.replace(/^```[a-z]*\n?|```$/g, '').trim() : raw;
-        return classificationSchema.safeParse(JSON.parse(json)).data ?? null;
+        return schema.safeParse(JSON.parse(json)).data ?? null;
       } catch {
         return null;
       }
@@ -139,6 +144,12 @@ async function safeClassify(classifier: Classifier, text: string, existing: stri
   }
 }
 
+export function getExistingProjects(db: Database, ownerId: string): string[] {
+  const rows = db.prepare("SELECT DISTINCT project FROM entries WHERE owner_id = ? AND project != 'Inbox'")
+    .all(ownerId) as { project: string }[];
+  return rows.map(({ project }) => project);
+}
+
 // Apply a validated classification to an entry. Never throws.
 // Optimistic concurrency: applies only if the entry is still pending and unmodified
 // (updated_at unchanged) since the snapshot was taken — a manual edit or a delete wins.
@@ -148,8 +159,7 @@ async function safeClassify(classifier: Classifier, text: string, existing: stri
 export async function classifyEntry(entry: { id: string; owner_id: string; original_text: string; title: string; kind: string; project: string; tags: string; ai_state: string; updated_at: string }, db: Database): Promise<'done' | 'skipped' | 'failed'> {
   if (entry.ai_state !== 'pending') return 'skipped';
   try {
-    const existing = db.prepare('SELECT DISTINCT project FROM entries WHERE owner_id = ? AND project != \'Inbox\'').all(entry.owner_id) as { project: string }[];
-    const existingProjects = existing.map((r) => r.project);
+    const existingProjects = getExistingProjects(db, entry.owner_id);
     const classifier = getClassifier();
     let source = classifier.name;
     let result = await safeClassify(classifier, entry.original_text, existingProjects);

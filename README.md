@@ -14,7 +14,7 @@ Dev with hot reload: `npm run dev` (API on :3000, Vite on :5173; `DEV_AUTH_BYPAS
 
 ## Telegram
 
-- Set `TELEGRAM_BOT_TOKEN` in `.env` and restart: the bot starts long-polling and saves every text message (private chats only) to the sender's inbox. The `update_id` mark and entry are committed together in one SQLite transaction.
+- Set `TELEGRAM_BOT_TOKEN` in `.env` and restart to enable long polling in private chats. Recall proposes a draft or asks a question. Confirm with **✓ Сохранить** or the text «да», correct the draft with a follow-up, or say «пока не сохраняй» to cancel. An explicit «Запиши …» saves directly when the intent is clear. Only confirmed entries appear in the Mini App.
 - BotFather setup (one-time, by the bot owner):
   1. `/newbot` → copy the token to `.env` (`TELEGRAM_BOT_TOKEN`).
   2. `/setcommands` → commands `start`, `help` (Russian descriptions optional).

@@ -135,7 +135,7 @@ await app.listen({ host: process.env.HOST || '127.0.0.1', port: Number(process.e
 app.log.info(`IdeaFlow listening (classifier: ${getClassifier().name}, devBypass: ${devMode ? 'ON' : 'off'})`);
 
 if (token) {
-  bot = startTelegramBot({ token, db, log: app.log, webOrigin: process.env.WEB_ORIGIN, onEntrySaved: () => aiWorker.kick() });
+  bot = startTelegramBot({ token, db, log: app.log, webOrigin: process.env.WEB_ORIGIN });
 } else {
   app.log.warn('TELEGRAM_BOT_TOKEN is not set — bot polling disabled');
 }
