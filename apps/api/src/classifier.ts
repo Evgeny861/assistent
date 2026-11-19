@@ -150,6 +150,19 @@ export function getExistingProjects(db: Database, ownerId: string): string[] {
   return rows.map(({ project }) => project);
 }
 
+export function getAvailableProjects(db: Database, ownerId: string): string[] {
+  return [...new Set([...getExistingProjects(db, ownerId), ...projectAllowlist])];
+}
+
+export function findProject(projects: string[], name: string): string | undefined {
+  const key = projectKey(name);
+  return key === 'inbox' ? 'Inbox' : projects.find((project) => projectKey(project) === key);
+}
+
+function projectKey(name: string): string {
+  return name.normalize('NFKC').trim().replace(/\s+/gu, ' ').toLowerCase();
+}
+
 // Apply a validated classification to an entry. Never throws.
 // Optimistic concurrency: applies only if the entry is still pending and unmodified
 // (updated_at unchanged) since the snapshot was taken — a manual edit or a delete wins.

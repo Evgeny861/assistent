@@ -110,6 +110,17 @@ test('Telegram drafts: discuss, correct, confirm once, cancel, and reject obsole
     ['Завтра в 130 проверить отчёт', { title: 'Проверить отчёт', when: 'Завтра в 13' }],
   ]);
   const realFetch = globalThis.fetch;
+  const generalGift = 'Подарок маме — пауэрбанк';
+  const newYearGift = 'Запиши подарок на Новый год — настолка';
+  const nextGift = 'На НГ подарить папе наушники';
+  const marchGift = 'Подарок маме на 8 марта — цветы';
+  const correction = 'Это на Новый год';
+  const giftProjects = new Map([
+    [generalGift, 'Подарки'], [newYearGift, 'Подарки на Новый год'],
+    [nextGift, 'подарки  на новый год'], [marchGift, 'Подарки на 8 Марта'],
+    [correction, 'Подарки на Новый год'],
+  ]);
+  const categoryLists = new Map<string, string[]>();
   t.mock.method(globalThis, 'fetch', (input: string | URL | Request, init?: RequestInit) => {
     if (!String(input).startsWith('https://generativelanguage.googleapis.com/')) return realFetch(input, init);
     const body = JSON.parse(String(init?.body));
@@ -129,13 +140,14 @@ test('Telegram drafts: discuss, correct, confirm once, cancel, and reject obsole
           classification: {
             title: latest.includes('поправка') ? 'Подключить Claude' : latest === 'да' ? 'Сходить на Мстителей в выходные' : latest,
             kind: latest.includes('поправка') ? 'task' : 'idea',
-            project: latest.includes('Management OS') ? 'Management OS' : undefined,
+            project: giftProjects.get(latest) ?? (latest.includes('Management OS') ? 'Management OS' : undefined),
             tags: ['recall'],
             confidence: 0.9,
           },
         };
     if (latest === 'Задача: офлайн') return Promise.resolve(new Response(null, { status: 401 }));
-    const decision = { decision: payload };
+    if (giftProjects.has(latest)) categoryLists.set(latest, data.projects);
+    const decision = { decision: payload, newTopic: giftProjects.has(latest) && latest !== correction };
     return Promise.resolve(Response.json({ candidates: [{ content: { parts: [{ text: JSON.stringify(decision) }] } }] }));
   });
 
@@ -195,8 +207,8 @@ test('Telegram drafts: discuss, correct, confirm once, cancel, and reject obsole
   queue.push(privateText(1, 111, original));
   await waitFor(() => draftMessages().length === 1, 'a clear idea gets a draft');
   const first = draftMessages()[0];
-  assert.equal(menu(first)[0].text, '✓ Сохранить');
-  assert.match(first.text!, /Создам проект «Management OS»/);
+  assert.equal(menu(first)[0].text, '✓ Создать и сохранить');
+  assert.match(first.text!, /Создать категорию «Management OS»/);
   assert.deepEqual(entries(), []);
 
   // A correction hides the old keyboard and offers a new revision. Neither
@@ -382,6 +394,50 @@ test('Telegram drafts: discuss, correct, confirm once, cancel, and reject obsole
   const ordinary = await nextDraft(nextDraftIndex + 3);
   assert.match(ordinary.text!, /^Записать\?/u);
   assert.equal(menu(ordinary)[0].text, '✓ Сохранить');
+
+  const initialGifts = entries().length;
+  const initialGiftReminders = scheduled().length;
+  async function giftDraft(id: number, text: string) {
+    const index = draftMessages().length;
+    queue.push(privateText(id, 111, text));
+    return nextDraft(index);
+  }
+
+  const general = await giftDraft(101, generalGift);
+  assert.match(general.text!, /Создать категорию «Подарки»/u);
+  assert.equal(entries().length, initialGifts);
+  queue.push(press(102, 111, general.message_id, menu(general)[0].callback_data));
+  await waitFor(() => entries().length === initialGifts + 1, 'one tap saves the gift and its category');
+
+  const newYear = await giftDraft(103, newYearGift);
+  assert.match(newYear.text!, /Создать категорию «Подарки на Новый год»/u);
+  assert.ok(categoryLists.get(newYearGift)?.includes('Подарки'));
+  assert.equal(entries().length, initialGifts + 1, 'a direct command still asks before creating a category');
+  queue.push(privateText(104, 111, 'да'));
+  await waitFor(() => entries().length === initialGifts + 2, 'text confirmation creates the category');
+
+  const existing = await giftDraft(105, nextGift);
+  assert.match(existing.text!, /Записать в «Подарки на Новый год»\?/u);
+  assert.equal(menu(existing)[0].text, '✓ Сохранить');
+  assert.ok(categoryLists.get(nextGift)?.includes('Подарки на Новый год'));
+  queue.push(press(106, 111, existing.message_id, menu(existing)[0].callback_data));
+  await waitFor(() => entries().length === initialGifts + 3, 'another gift uses the existing category');
+
+  const march = await giftDraft(107, marchGift);
+  assert.match(march.text!, /Создать категорию «Подарки на 8 Марта»/u);
+  const corrected = await giftDraft(108, correction);
+  assert.match(corrected.text!, /Записать в «Подарки на Новый год»\?/u);
+  assert.ok(cleared(march.message_id));
+  queue.push(
+    press(109, 111, march.message_id, menu(march)[0].callback_data),
+    press(110, 111, corrected.message_id, menu(corrected)[0].callback_data),
+  );
+  await waitFor(() => entries().length === initialGifts + 4, 'only the revised draft can be saved');
+  assert.deepEqual(entries().slice(initialGifts).map((entry) => (entry as { project: string }).project), [
+    'Подарки', 'Подарки на Новый год', 'Подарки на Новый год', 'Подарки на Новый год',
+  ]);
+  assert.equal(scheduled().length, initialGiftReminders, 'gift occasions leave reminders untouched');
+  assert.equal(errors.length, 1, 'no additional errors during gift category prompts');
 });
 
 

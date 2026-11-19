@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { Database } from 'better-sqlite3';
+import { findProject, getAvailableProjects } from './classifier.js';
 import { addEntry } from './db.js';
 import type { ConversationState } from './conversation.js';
 
@@ -36,13 +37,16 @@ export function telegramDrafts(db: Database) {
     return { revision, state, messageId: null };
   }
 
-  const confirm = db.transaction((owner: string, revision: string) => {
+  const confirm = db.transaction((owner: string, revision: string, { allowNewCategory = true } = {}) => {
     const draft = get(owner);
     if (draft?.revision !== revision || !draft.state.source || draft.state.reminder) return;
     const decision = getDecision(draft);
     if (decision?.action !== 'draft') return;
+    const { project: requested } = decision.classification;
+    const existing = requested && findProject(getAvailableProjects(db, owner), requested);
+    if (requested && !existing && !allowNewCategory) return;
     const entry = addEntry(owner, draft.state.originalText, db, {
-      classification: decision.classification,
+      classification: { ...decision.classification, project: existing || requested },
       source: draft.state.source,
     });
     remove.run(owner, revision);

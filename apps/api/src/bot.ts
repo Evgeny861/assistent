@@ -1,7 +1,7 @@
 import { Bot, Context, InlineKeyboard } from 'grammy';
 import type { Database } from 'better-sqlite3';
 import { directSave, planConversation } from './conversation.js';
-import { getExistingProjects, projectAllowlist } from './classifier.js';
+import { findProject, getAvailableProjects, getExistingProjects, projectAllowlist } from './classifier.js';
 import { getDecision, TelegramDraft, telegramDrafts } from './telegramDrafts.js';
 import type { Entry } from './db.js';
 import { isTelegramUserAllowed } from './auth.js';
@@ -163,20 +163,27 @@ ${reminder.draft.title}`;
       return;
     }
     if (decision.action === 'draft' && saveDirectly) {
-      const saved = drafts.confirm(owner, draft.revision);
-      if (saved) await showSaved(ctx, draft, saved);
-      return;
+      const saved = drafts.confirm(owner, draft.revision, { allowNewCategory: false });
+      if (saved) {
+        await showSaved(ctx, draft, saved);
+        return;
+      }
     }
 
     const keyboard = new InlineKeyboard();
     let text: string;
     if (decision.action === 'draft') {
       const { title, kind, project } = decision.classification;
-      const placement = project && project !== 'Inbox'
-        ? projects.includes(project) ? `Проект: «${project}».` : `Создам проект «${project}» при сохранении.`
-        : '';
-      text = [`Записать?`, `${kindLabels[kind]}: ${title}`, placement].filter(Boolean).join('\n');
-      keyboard.text('✓ Сохранить', `draft:${draft.revision}:s`);
+      const existing = project && findProject(getAvailableProjects(db, owner), project);
+      const entryText = `${kindLabels[kind]}: ${title}`;
+      if (project && !existing) {
+        text = `Создать категорию «${project}» и сохранить запись?\n${entryText}`;
+        keyboard.text('✓ Создать и сохранить', `draft:${draft.revision}:s`);
+      } else {
+        const question = existing && existing !== 'Inbox' ? `Записать в «${existing}»?` : 'Записать?';
+        text = `${question}\n${entryText}`;
+        keyboard.text('✓ Сохранить', `draft:${draft.revision}:s`);
+      }
     } else if (decision.action === 'clarify') {
       text = decision.question;
       for (const [i, choice] of decision.choices.entries()) keyboard.text(choice, `draft:${draft.revision}:${i}`).row();
